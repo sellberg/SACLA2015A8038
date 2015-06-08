@@ -39,11 +39,11 @@ parser.add_option("-v", "--verbose", action="store_true", dest="verbose", help="
 # after the end of the path!
 ##############################################
 csv_dir = "/work/fperakis/output/"
-#csv_dir = ""
+csv_dir = ""
 source_dir = "/work/fperakis/output/"
-#source_dir = ""
+source_dir = ""
 working_dir = "/work/fperakis/output/"
-#working_dir = ""
+working_dir = ""
 original_dir = os.getcwd() + '/'
 
 # PARAMETERS
@@ -107,23 +107,26 @@ if options.inputFile != '' and os.path.exists(options.inputFile):
             motorsThatMoved = removeStandardParameters(parametersThatChanged)
             print "\tFound %d motor(s) that moved:" % len(motorsThatMoved)
             print "\t\t" + ', '.join(motorsThatMoved)
+            motorTags = csvDict[tagIdentifier].astype(np.int64)
             if len(motorsThatMoved) == 1:
                 averageAllHits = False
                 motorValues = csvDict[motorsThatMoved[0]]
-                motorTags = csvDict[tagIdentifier]
+                # unordered set
+                #motorValuesSet = set(motorValues)
+                # ordered set (original order)
+                motorValuesOrderedSet = OrderedSet(motorValues)
+                motorValuesOrderedArray = []
+                for m in motorValuesOrderedSet:
+                    motorValuesOrderedArray.append(m)
+                motorValuesOrderedArray = np.array(motorValuesOrderedArray)
             elif (len(motorsThatMoved > 1)):
                 print "Several motors moved at once during run, aborting..."
                 sys.exit(1)
             else:
                 print "No motor moved during run, all hits will be averaged."
                 averageAllHits = True
-            # this is used to break the script for testing after a certain amount of shots
-            if options.nShots > 0:
-                xraysOn = csvDict['XFEL shutter'].astype(np.bool)[:options.nShots]
-                laserOn = csvDict['Laser shutter'].astype(np.bool)[:options.nShots]
-            else:
-                xraysOn = csvDict['XFEL shutter'].astype(np.bool)
-                laserOn = csvDict['Laser shutter'].astype(np.bool)
+            xraysStatus = csvDict['XFEL shutter']
+            laserStatus = csvDict['Laser shutter']
     else:
         print "CSV file '%s' does not exist, aborting..." % csvFileName
         sys.exit(1)
@@ -166,6 +169,8 @@ if options.inputFile != '' and os.path.exists(options.inputFile):
             sys.exit(1)
     toc = time.time()
     times.append(toc - tic)
+    runIndex = 0
+    #averageAllHits = True
     for r in runList:
         print "Compressing shots for run %d..." % r
         inputPath = "run_%d" % r
@@ -208,17 +213,61 @@ if options.inputFile != '' and os.path.exists(options.inputFile):
         runRefTemperatureStd = []
         runRefTemperatureExcludedMean = []
         runRefTemperatureExcludedStd = []
-        runTags = []
-        runIndex = 0
+        # tags
+        runDataTags = []
+        runReferenceTags = []
+        runBackgroundTags = []
+        detectorIndex = 0
         for d in runKeys:
             if "detector" in d:
                 p = inputPath + '/' + d
                 detectorKeys = np.array(f[p].keys())
                 #outputDetectorGroup = outputRunGroup.require_group(d)
                 outputDetectorGroup = o.create_group(p)
-                detectorData = []
-                detectorStatus = []
-                detectorTemperature = []
+        	# data
+        	detectorDataSum = np.array([])
+        	detectorDataSquaredSum = np.array([])
+        	detectorDataExcludedSum = np.array([])
+        	detectorDataExcludedSquaredSum = np.array([])
+        	# background
+        	detectorBackgroundSum = np.array([])
+        	detectorBackgroundSquaredSum = np.array([])
+        	detectorBackgroundExcludedSum = np.array([])
+        	detectorBackgroundExcludedSquaredSum = np.array([])
+        	# reference
+        	detectorReferenceSum = np.array([])
+        	detectorReferenceSquaredSum = np.array([])
+        	detectorReferenceExcludedSum = np.array([])
+        	detectorReferenceExcludedSquaredSum = np.array([])
+        	# data temperature
+        	detectorTemperatureSum = np.array([])
+        	detectorTemperatureSquaredSum = np.array([])
+        	detectorTemperatureExcludedSum = np.array([])
+        	detectorTemperatureExcludedSquaredSum = np.array([])
+        	# background temperature
+        	detectorBGTemperatureSum = np.array([])
+        	detectorBGTemperatureSquaredSum = np.array([])
+        	detectorBGTemperatureExcludedSum = np.array([])
+        	detectorBGTemperatureExcludedSquaredSum = np.array([])
+        	# reference temperature
+        	detectorRefTemperatureSum = np.array([])
+        	detectorRefTemperatureSquaredSum = np.array([])
+        	detectorRefTemperatureExcludedSum = np.array([])
+        	detectorRefTemperatureExcludedSquaredSum = np.array([])
+                if averageAllHits:
+                    # tags with one index (first element is included tags, second element is excluded tags)
+                    detectorDataTags = [[], []]
+                else:
+                    # tags where first index is the scan motor position, second index is the included/excluded tags
+                    detectorDataTags = [[[], []] for i in range(len(motorValuesOrderedArray))]
+        	detectorReferenceTags = [[], []]
+        	detectorBackgroundTags = [[], []]
+                anyDataHits = False
+                anyExcludedDataHits = False
+                anyReferenceHits = False
+                anyExcludedReferenceHits = False
+                anyBackgroundShots = False
+                anyExcludedBackgroundShots = False
                 tags = []
                 tagCounter = 0
                 for t in detectorKeys:
@@ -231,358 +280,394 @@ if options.inputFile != '' and os.path.exists(options.inputFile):
                         print "\tReading %s data..." % d
                         tic = time.time()
                     elif "tag" in t:
-                        if options.verbose:
-                            print "\t\t%s" % t
                         # np.int might be too small for ~9 digit integer (32-bit has ~10 digits precision), going for 64-bit
                         tagNumber = np.int64((re.sub('tag_', '', t)))
                         tags.append(tagNumber)
+                        tagIndex = np.where(motorTags == tagNumber)
+                        detectorStatus = f[pt + '/detector_status'].value
+                        # save data and temperature as 64-bit for sum and squared sum to avoid rounding errors when calculating stdev
+                        detectorData = np.array(f[pt + '/detector_data'], dtype=np.float64)
+                        detectorTemperature = np.float64(f[pt + '/temperature'].value)
+                        # xrays on and laser on
+                        if ((detectorStatus == 1) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 1)):
+                            anyDataHits = True
+                            if averageAllHits:
+                                detectorDataTags[0].append(tagNumber)
+                            	if detectorDataSum.any():
+                            	    detectorDataSum += detectorData
+                            	    detectorDataSquaredSum += detectorData*detectorData
+                            	    detectorTemperatureSum += detectorTemperature
+                            	    detectorTemperatureSquaredSum += detectorTemperature*detectorTemperature
+                            	else:
+                                    # create regular 2D array for sum if all hits are averaged
+                            	    detectorDataSum = detectorData
+                            	    detectorDataSquaredSum = detectorData*detectorData
+                            	    detectorTemperatureSum = detectorTemperature
+                            	    detectorTemperatureSquaredSum = detectorTemperature*detectorTemperature
+                                if options.verbose:
+                                    print "\t\t[%d] hit" % tagNumber
+                            else:
+                            	if not detectorDataSum.any():
+                                    # create 3D array for sum with first index being the scan motor position
+                            	    detectorDataSum = np.zeros((len(motorValuesOrderedArray),) + detectorData.shape, dtype=np.float64)
+                            	    detectorDataSquaredSum = np.zeros((len(motorValuesOrderedArray),) + detectorData.shape, dtype=np.float64)
+                            	    detectorTemperatureSum = np.zeros(len(motorValuesOrderedArray), dtype=np.float64)
+                            	    detectorTemperatureSquaredSum = np.zeros(len(motorValuesOrderedArray), dtype=np.float64)
+                                # get rid of wrapping tuple so index works in list as well as numpy array
+                                motorValuesOrderedIndex = np.where(motorValuesOrderedArray == motorValues[tagIndex])[0]
+                                detectorDataTags[motorValuesOrderedIndex][0].append(tagNumber)
+                                detectorDataSum[motorValuesOrderedIndex] += detectorData
+                                detectorDataSquaredSum[motorValuesOrderedIndex] += detectorData*detectorData
+                                detectorTemperatureSum[motorValuesOrderedIndex] += detectorTemperature
+                                detectorTemperatureSquaredSum[motorValuesOrderedIndex] += detectorTemperature*detectorTemperature
+                                if options.verbose:
+                                    print "\t\t[%d] hit (%s = %.2e)" % (tagNumber, motorsThatMoved[0], motorValues[tagIndex])
+                        # xrays on and laser on (excluded)
+                        elif ((detectorStatus == 0) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 1)):
+                            anyExcludedDataHits = True
+                            if averageAllHits:
+                                detectorDataTags[1].append(tagNumber)
+                            	if detectorDataExcludedSum.any():
+                            	    detectorDataExcludedSum += detectorData
+                            	    detectorDataExcludedSquaredSum += detectorData*detectorData
+                            	    detectorTemperatureExcludedSum += detectorTemperature
+                            	    detectorTemperatureExcludedSquaredSum += detectorTemperature*detectorTemperature
+                            	else:
+                            	    detectorDataExcludedSum = detectorData
+                            	    detectorDataExcludedSquaredSum = detectorData*detectorData
+                            	    detectorTemperatureExcludedSum = detectorTemperature
+                            	    detectorTemperatureExcludedSquaredSum = detectorTemperature*detectorTemperature
+                                if options.verbose:
+                                    print "\t\t[%d] excluded hit" % tagNumber
+                            else:
+                            	if not detectorDataExcludedSum.any():
+                                    # create 3D array for sum with first index being the scan motor position
+                            	    detectorDataExcludedSum = np.zeros((len(motorValuesOrderedArray),) + detectorData.shape, dtype=np.float64)
+                            	    detectorDataExcludedSquaredSum = np.zeros((len(motorValuesOrderedArray),) + detectorData.shape, dtype=np.float64)
+                            	    detectorTemperatureExcludedSum = np.zeros(len(motorValuesOrderedArray), dtype=np.float64)
+                            	    detectorTemperatureExcludedSquaredSum = np.zeros(len(motorValuesOrderedArray), dtype=np.float64)
+                                motorValuesOrderedIndex = np.where(motorValuesOrderedArray == motorValues[tagIndex])
+                                print motorValuesOrderedIndex[0]
+                                detectorDataTags[motorValuesOrderedIndex][1].append(tagNumber)
+                                detectorDataExcludedSum[motorValuesOrderedIndex] += detectorData
+                                detectorDataExcludedSquaredSum[motorValuesOrderedIndex] += detectorData*detectorData
+                                detectorTemperatureExcludedSum[motorValuesOrderedIndex] += detectorTemperature
+                                detectorTemperatureExcludedSquaredSum[motorValuesOrderedIndex] += detectorTemperature*detectorTemperature
+                                if options.verbose:
+                                    print "\t\t[%d] excluded hit (%s = %.2e)" % (tagNumber, motorsThatMoved[0], motorValues[tagIndex])
+                        # xrays on and laser off
+                        elif ((detectorStatus == 1) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 0)):
+                            anyReferenceHits = True
+                            detectorReferenceTags[0].append(tagNumber)
+                            if detectorReferenceSum.any():
+                                detectorReferenceSum += detectorData
+                                detectorReferenceSquaredSum += detectorData*detectorData
+                                detectorRefTemperatureSum += detectorTemperature
+                                detectorRefTemperatureSquaredSum += detectorTemperature*detectorTemperature
+                            else:
+                                detectorReferenceSum = detectorData
+                                detectorReferenceSquaredSum = detectorData*detectorData
+                                detectorRefTemperatureSum = detectorTemperature
+                                detectorRefTemperatureSquaredSum = detectorTemperature*detectorTemperature
+                            if options.verbose:
+                                print "\t\t[%d] reference hit" % tagNumber
+                        # xrays on and laser off (excluded)
+                        elif ((detectorStatus == 0) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 0)):
+                            anyExcludedReferenceHits = True
+                            detectorReferenceTags[1].append(tagNumber)
+                            if detectorReferenceExcludedSum.any():
+                                detectorReferenceExcludedSum += detectorData
+                                detectorReferenceExcludedSquaredSum += detectorData*detectorData
+                                detectorRefTemperatureExcludedSum += detectorTemperature
+                                detectorRefTemperatureExcludedSquaredSum += detectorTemperature*detectorTemperature
+                            else:
+                                detectorReferenceExcludedSum = detectorData
+                                detectorReferenceExcludedSquaredSum = detectorData*detectorData
+                                detectorRefTemperatureExcludedSum = detectorTemperature
+                                detectorRefTemperatureExcludedSquaredSum = detectorTemperature*detectorTemperature
+                            if options.verbose:
+                                print "\t\t[%d] excluded reference hit" % tagNumber
+                        # xrays off
+                        elif ((detectorStatus == 1) and (xraysStatus[tagIndex] == 0)):
+                            anyBackgroundShots = True
+                            detectorBackgroundTags[0].append(tagNumber)
+                            if detectorBackgroundSum.any():
+                                detectorBackgroundSum += detectorData
+                                detectorBackgroundSquaredSum += detectorData*detectorData
+                                detectorBGTemperatureSum += detectorTemperature
+                                detectorBGTemperatureSquaredSum += detectorTemperature*detectorTemperature
+                            else:
+                                detectorBackgroundSum = detectorData
+                                detectorBackgroundSquaredSum = detectorData*detectorData
+                                detectorBGTemperatureSum = detectorTemperature
+                                detectorBGTemperatureSquaredSum = detectorTemperature*detectorTemperature                                
+                            if options.verbose:
+                                print "\t\t[%d] background shot" % tagNumber
+                        # xrays off (excluded)
+                        elif ((detectorStatus == 0) and (xraysStatus[tagIndex] == 0)):
+                            anyExcludedBackgroundShots = True
+                            detectorBackgroundTags[1].append(tagNumber)
+                            if detectorBackgroundExcludedSum.any():
+                                detectorBackgroundExcludedSum += detectorData
+                                detectorBackgroundExcludedSquaredSum += detectorData*detectorData
+                                detectorBGTemperatureExcludedSum += detectorTemperature
+                                detectorBGTemperatureExcludedSquaredSum += detectorTemperature*detectorTemperature
+                            else:
+                                detectorBackgroundExcludedSum = detectorData
+                                detectorBackgroundExcludedSquaredSum = detectorData*detectorData
+                                detectorBGTemperatureExcludedSum = detectorTemperature
+                                detectorBGTemperatureExcludedSquaredSum = detectorTemperature*detectorTemperature
+                            if options.verbose:
+                                print "\t\t[%d] excluded background shot" % tagNumber
+                        else:
+                            print "Tag %d could not be classified (detector = %d, xrays = %d, laser = %d)..." % (tagNumber, detectorStatus, xraysStatus[tagIndex], laserStatus[tagIndex])
                         tagCounter += 1
-                        # input data is 32-bit so should be natively saved as float-32,
-                        # since there is no time difference in explicitly stating np.float32,
-                        # but the time to iterate over tags increases by a factor 2 when explicitly stating np.float64
-                        detectorData.append(np.array(f[pt + '/detector_data']))
-                        #detectorData.append(np.array(f[pt + '/detector_data'], dtype=np.float64))
-                        detectorStatus.append(f[pt + '/detector_status'].value)
-                        detectorTemperature.append(f[pt + '/temperature'].value)
                     # this is used to break the script for testing
                     if (options.nShots > 0) and (tagCounter >= options.nShots):
                         break
                 toc = time.time()
                 times.append(toc - tic)
                 print "\tRead detector data for %d tags in %.2f s" % (tagCounter, toc - tic)
-                print "\tConverting data for '%s' to internal arrays..." % d
-                tic = time.time()
-                # save as np.float32 since input data is 32-bit and we want to save memory
-                detectorData = np.array(detectorData, dtype=np.float32)
-                #detectorData = np.array(detectorData, dtype=np.float64)
-                detectorStatus = np.array(detectorStatus, dtype=np.int)
-                detectorTemperature = np.array(detectorTemperature, dtype=np.float)
+                
+                # print statistics
+                hitStatsString = ""
+                if anyDataHits:
+                    if averageAllHits:
+                        hitStatsString += "\t\t%d hits\n" % len(detectorDataTags[0])
+                    else:
+                        totalHits = 0
+                        for m in range(len(motorValuesOrderedArray)):
+                            if detectorDataTags[m][0]:
+                                hitStatsString += "\t\t%d hits [%s = %.2f]\n" % (len(detectorDataTags[m][0]), motorsThatMoved[0], motorValuesOrderedArray[m])
+                                totalHits += len(detectorDataTags[m][0])
+                        hitStatsString += "\t\t%d total hits\n" % totalHits
+                if anyExcludedDataHits:
+                    if averageAllHits:
+                        hitStatsString += "\t\t(%d excluded hits)\n" % len(detectorDataTags[0])
+                    else:
+                        totalHits = 0
+                        for m in range(len(motorValuesOrderedArray)):
+                            if detectorDataTags[m][1]:
+                                hitStatsString += "\t\t(%d excludedhits [%s = %.2f])\n" % (len(detectorDataTags[m][1]), motorsThatMoved[0], motorValuesOrderedArray[m])
+                                totalHits += len(detectorDataTags[m][1])
+                        hitStatsString += "\t\t(%d total hits)\n" % totalHits
+                if anyReferenceHits:
+                    hitStatsString += "\t\t%d reference hits\n" % len(detectorReferenceTags[0])
+                if anyExcludedReferenceHits:
+                    hitStatsString += "\t\t(%d excluded reference hits)\n" % len(detectorReferenceTags[1])
+                if anyBackgroundShots:
+                    hitStatsString += "\t\t%d background hits\n" % len(detectorBackgroundTags[0])
+                if anyExcludedBackgroundShots:
+                    hitStatsString += "\t\t(%d excluded background hits)\n" % len(detectorBackgroundTags[1])
+                if hitStatsString != '':
+                    print hitStatsString[:-1]
                 tags = np.array(tags)
+                
+                # calculate mean and standard deviation
+                print "\tCalculating data statistics..."
+                tic = time.time()
+                if anyDataHits:
+                    if averageAllHits:
+                        # calculate mean
+                        runDataMean.append(detectorDataSum/np.float(len(detectorDataTags[0])))
+                        runTemperatureMean.append(detectorTemperatureSum/np.float(len(detectorDataTags[0])))
+                        # calculate stdev from sqrt(E[X^2] - E[X]^2), only works for 1/N (non-corrected) normalization
+                        runDataStd.append(np.sqrt(detectorDataSquaredSum - detectorDataSum*detectorDataSum/np.float(len(detectorDataTags[0])))/np.float(len(detectorDataTags[0])))
+                        # round root-operand to 10 decimals to avoid negative numbers for really small deviations
+                        runTemperatureStd.append(np.sqrt(round((detectorTemperatureSquaredSum - detectorTemperatureSum*detectorTemperatureSum/np.float(len(detectorDataTags[0])))/np.float(len(detectorDataTags[0])))))
+                    else:
+                        # initialize arrays to zero
+                        runDataMean.append(np.zeros_like(detectorDataSum))
+                        runDataStd.append(np.zeros_like(detectorDataSum))
+                        runTemperatureMean.append(np.zeros_like(detectorTemperatureSum))
+                        runTemperatureStd.append(np.zeros_like(detectorTemperatureSum))
+                        for m in range(len(motorValuesOrderedArray)):
+                            if detectorDataTags[m][0]:
+                                # calculate mean
+                                runDataMean[runIndex][m] = detectorDataSum[m]/np.float(len(detectorDataTags[m][0]))
+                                runTemperatureMean[runIndex][m] = detectorTemperatureSum[m]/np.float(len(detectorDataTags[m][0]))
+                                # calculate stdev from sqrt(E[X^2] - E[X]^2), only works for 1/N (non-corrected) normalization
+                                runDataStd[runIndex][m] = np.sqrt((detectorDataSquaredSum[m] - detectorDataSum[m]*detectorDataSum[m]/np.float(len(detectorDataTags[m][0])))/np.float(len(detectorDataTags[m][0])))
+                                # round root-operand to 10 decimals to avoid negative numbers for really small deviations
+                                runTemperatureStd[runIndex][m] = np.sqrt(round((detectorTemperatureSquaredSum[m] - detectorTemperatureSum[m]*detectorTemperatureSum[m]/np.float(len(detectorDataTags[m][0])))/np.float(len(detectorDataTags[m][0]))*1.0E10)/1.0E10)
+                if anyExcludedDataHits:
+                    if averageAllHits:
+                        # calculate mean
+                        runDataExcludedMean.append(detectorDataExcludedSum/np.float(len(detectorDataTags[1])))
+                        runTemperatureExcludedMean.append(detectorTemperatureExcludedSum/np.float(len(detectorDataTags[0])))
+                        # calculate stdev from sqrt(E[X^2] - E[X]^2), only works for 1/N (non-corrected) normalization
+                        runDataExcludedStd.append(np.sqrt((detectorDataExcludedSquaredSum - detectorDataExcludedSum*detectorDataExcludedSum/np.float(len(detectorDataTags[1])))/np.float(len(detectorDataTags[1]))))
+                        # round root-operand to 10 decimals to avoid negative numbers for really small deviations
+                        runTemperatureExcludedStd.append(np.sqrt(round((detectorTemperatureExcludedSquaredSum - detectorTemperatureExcludedSum*detectorTemperatureExcludedSum/np.float(len(detectorDataTags[1])))/np.float(len(detectorDataTags[0]))*1.0E10)/1.0E10))
+                    else:
+                        # initialize arrays to zero
+                        runDataExcludedMean.append(np.zeros_like(detectorDataExcludedSum))
+                        runDataExcludedStd.append(np.zeros_like(detectorDataExcludedSum))
+                        runTemperatureExcludedMean.append(np.zeros_like(detectorTemperatureExcludedSum))
+                        runTemperatureExcludedStd.append(np.zeros_like(detectorTemperatureExcludedSum))
+                        for m in range(len(motorValuesOrderedArray)):
+                            if detectorDataTags[m][1]:
+                                # calculate mean
+                                runDataExcludedMean[runIndex][m] = detectorDataExcludedSum[m]/np.float(len(detectorDataTags[m][1]))
+                                runTemperatureExcludedMean[runIndex][m] = detectorTemperatureExcludedSum[m]/np.float(len(detectorDataTags[m][1]))
+                                # calculate stdev from sqrt(E[X^2] - E[X]^2), only works for 1/N (non-corrected) normalization
+                                runDataExcludedStd[runIndex][m] = np.sqrt((detectorDataExcludedSquaredSum[m] - detectorDataExcludedSum[m]*detectorDataExcludedSum[m]/np.float(len(detectorDataTags[m][1])))/np.float(len(detectorDataTags[m][1])))
+                                # round root-operand to 10 decimals to avoid negative numbers for really small deviations
+                                runTemperatureExcludedStd[runIndex][m] = np.sqrt(round((detectorTemperatureExcludedSquaredSum[m] - detectorTemperatureExcludedSum[m]*detectorTemperatureExcludedSum[m]/np.float(len(detectorDataTags[m][1])))/np.float(len(detectorDataTags[m][1]))*1.0E10)/1.0E10)
+                if anyReferenceHits:
+                        # calculate mean
+                        runReferenceMean.append(detectorReferenceSum/np.float(len(detectorReferenceTags[0])))
+                        runRefTemperatureMean.append(detectorRefTemperatureSum/np.float(len(detectorReferenceTags[0])))
+                        # calculate stdev from sqrt(E[X^2] - E[X]^2), only works for 1/N (non-corrected) normalization
+                        runReferenceStd.append(np.sqrt((detectorReferenceSquaredSum - detectorReferenceSum*detectorReferenceSum/np.float(len(detectorReferenceTags[0])))/np.float(len(detectorReferenceTags[0]))))
+                        # round root-operand to 10 decimals to avoid negative numbers for really small deviations
+                        runRefTemperatureStd.append(np.sqrt(round((detectorRefTemperatureSquaredSum - detectorRefTemperatureSum*detectorRefTemperatureSum/np.float(len(detectorReferenceTags[0])))/np.float(len(detectorReferenceTags[0]))*1.0E10)/1.0E10))
+                if anyExcludedReferenceHits:
+                        # calculate mean
+                        runReferenceExcludedMean.append(detectorReferenceExcludedSum/np.float(len(detectorReferenceTags[1])))
+                        runRefTemperatureExcludedMean.append(detectorRefTemperatureExcludedSum/np.float(len(detectorReferenceTags[0])))
+                        # calculate stdev from sqrt(E[X^2] - E[X]^2), only works for 1/N (non-corrected) normalization
+                        runReferenceExcludedStd.append(np.sqrt(round((detectorReferenceExcludedSquaredSum - detectorReferenceExcludedSum*detectorReferenceExcludedSum/np.float(len(detectorReferenceTags[1])))/np.float(len(detectorReferenceTags[1]))*1.0E10)/1.0E10))
+                        # round root-operand to 10 decimals to avoid negative numbers for really small deviations
+                        runRefTemperatureExcludedStd.append(np.sqrt((detectorRefTemperatureExcludedSquaredSum - detectorRefTemperatureExcludedSum*detectorRefTemperatureExcludedSum/np.float(len(detectorReferenceTags[1])))/np.float(len(detectorReferenceTags[0]))))
+                if anyBackgroundShots:
+                        # calculate mean
+                        runBackgroundMean.append(detectorBackgroundSum/np.float(len(detectorBackgroundTags[0])))
+                        runBGTemperatureMean.append(detectorBGTemperatureSum/np.float(len(detectorBackgroundTags[0])))
+                        # calculate stdev from sqrt(E[X^2] - E[X]^2), only works for 1/N (non-corrected) normalization
+                        runBackgroundStd.append(np.sqrt((detectorBackgroundSquaredSum - detectorBackgroundSum*detectorBackgroundSum/np.float(len(detectorBackgroundTags[0])))/np.float(len(detectorBackgroundTags[0]))))
+                        # round root-operand to 10 decimals to avoid negative numbers for really small deviations
+                        runBGTemperatureStd.append(np.sqrt(round((detectorBGTemperatureSquaredSum - detectorBGTemperatureSum*detectorBGTemperatureSum/np.float(len(detectorBackgroundTags[0])))/np.float(len(detectorBackgroundTags[0]))*1.0E10)/1.0E10))
+                if anyExcludedBackgroundShots:
+                        # calculate mean
+                        runBackgroundExcludedMean.append(detectorBackgroundExcludedSum/np.float(len(detectorBackgroundTags[1])))
+                        runBGTemperatureExcludedMean.append(detectorBGTemperatureExcludedSum/np.float(len(detectorBackgroundTags[0])))
+                        # calculate stdev from sqrt(E[X^2] - E[X]^2), only works for 1/N (non-corrected) normalization
+                        runBackgroundExcludedStd.append(np.sqrt((detectorBackgroundExcludedSquaredSum - detectorBackgroundExcludedSum*detectorBackgroundExcludedSum/np.float(len(detectorBackgroundTags[1])))/np.float(len(detectorBackgroundTags[1]))))
+                        # round root-operand to 10 decimals to avoid negative numbers for really small deviations
+                        runBGTemperatureExcludedStd.append(np.sqrt(round((detectorBGTemperatureExcludedSquaredSum - detectorBGTemperatureExcludedSum*detectorBGTemperatureExcludedSum/np.float(len(detectorBackgroundTags[1])))/np.float(len(detectorBackgroundTags[0]))*1.0E10)/1.0E10))
                 toc = time.time()
                 times.append(toc - tic)
-                print "\tConverted data in %.2f s" % (toc - tic)
-                xraysOnAndLaserOn = (detectorStatus == 1) & xraysOn & laserOn
-                xraysOnAndLaserOnExcluded = (detectorStatus == 0) & xraysOn & laserOn
-                xraysOnAndLaserOff = (detectorStatus == 1) & xraysOn & (laserOn == 0)
-                xraysOnAndLaserOffExcluded = (detectorStatus == 0) & xraysOn & (laserOn == 0)
-                xraysOff = (detectorStatus == 1) & (xraysOn == 0)
-                xraysOffExcluded = (detectorStatus == 0) & (xraysOn == 0)
-                if averageAllHits:
-                    # average data
-                    print "\tAveraging all hits for '%s'..." % d
-                    tic = time.time()
-                    # xrays on and laser on
-                    if (xraysOnAndLaserOn).any():
-                        runDataMean.append(detectorData[np.where(xraysOnAndLaserOn)].mean(axis=0))
-                        runDataStd.append(detectorData[np.where(xraysOnAndLaserOn)].std(axis=0))
-                        runTemperatureMean.append(detectorTemperature[np.where(xraysOnAndLaserOn)].mean(axis=0))
-                        runTemperatureStd.append(detectorTemperature[np.where(xraysOnAndLaserOn)].std(axis=0))
+                print "\tCalculated data statistics in %.2f s" % (toc - tic)
+
+                # save data to output file
+                print "\tSaving averaged data to '%s'..." % outputFileName
+                tic = time.time()
+                # xrays on and laser on
+                if anyDataHits:
+                    if averageAllHits:
+                    	# create data groups
+                    	od = outputDetectorGroup.create_group("data")
+                    	odd = od.create_group("data")
+                    	odt = od.create_group("temperature")
+                    	# save data to data groups
+                    	odd.create_dataset("mean", data=runDataMean[runIndex])
+                    	odd.create_dataset("stdev", data=runDataStd[runIndex])
+                    	odt.create_dataset("mean", data=runTemperatureMean[runIndex])
+                    	odt.create_dataset("stdev", data=runTemperatureStd[runIndex])
+                    	od.create_dataset("tags", data=np.array(detectorDataTags[0], dtype=np.int64))
                     else:
-                        print "\t\tNo laser hits included..."
-                    if (xraysOnAndLaserOnExcluded).any():
-                        runDataExcludedMean.append(detectorData[np.where(xraysOnAndLaserOnExcluded)].mean(axis=0))
-                        runDataExcludedStd.append(detectorData[np.where(xraysOnAndLaserOnExcluded)].std(axis=0))
-                        runTemperatureExcludedMean.append(detectorTemperature[np.where(xraysOnAndLaserOnExcluded)].mean(axis=0))
-                        runTemperatureExcludedStd.append(detectorTemperature[np.where(xraysOnAndLaserOnExcluded)].std(axis=0))
-                    else:
-                        print "\t\tNo laser hits excluded..."
-                    # xrays on and laser off
-                    if (xraysOnAndLaserOff).any():
-                        runReferenceMean.append(detectorData[np.where(xraysOnAndLaserOff)].mean(axis=0))
-                        runReferenceStd.append(detectorData[np.where(xraysOnAndLaserOff)].std(axis=0))
-                        runRefTemperatureMean.append(detectorTemperature[np.where(xraysOnAndLaserOff)].mean(axis=0))
-                        runRefTemperatureStd.append(detectorTemperature[np.where(xraysOnAndLaserOff)].std(axis=0))
-                    else:
-                        print "\t\tNo reference hits included..."
-                    if (xraysOnAndLaserOffExcluded).any():
-                        runReferenceExcludedMean.append(detectorData[np.where(xraysOnAndLaserOffExcluded)].mean(axis=0))
-                        runReferenceExcludedStd.append(detectorData[np.where(xraysOnAndLaserOffExcluded)].std(axis=0))
-                        runRefTemperatureExcludedMean.append(detectorTemperature[np.where(xraysOnAndLaserOffExcluded)].mean(axis=0))
-                        runRefTemperatureExcludedStd.append(detectorTemperature[np.where(xraysOnAndLaserOffExcluded)].std(axis=0))
-                    else:
-                        print "\t\tNo reference hits excluded..."
-                    # xrays off
-                    if (xraysOff).any():
-                        runBackgroundMean.append(detectorData[np.where(xraysOff)].mean(axis=0))
-                        runBackgroundStd.append(detectorData[np.where(xraysOff)].std(axis=0))
-                        runBGTemperatureMean.append(detectorTemperature[np.where(xraysOff)].mean(axis=0))
-                        runBGTemperatureStd.append(detectorTemperature[np.where(xraysOff)].std(axis=0))
-                    else:
-                        print "\t\tNo background shots included..."
-                    if (xraysOffExcluded).any():
-                        runBackgroundExcludedMean.append(detectorData[np.where(xraysOffExcluded)].mean(axis=0))
-                        runBackgroundExcludedStd.append(detectorData[np.where(xraysOffExcluded)].std(axis=0))
-                        runBGTemperatureExcludedMean.append(detectorTemperature[np.where(xraysOffExcluded)].mean(axis=0))
-                        runBGTemperatureExcludedStd.append(detectorTemperature[np.where(xraysOffExcluded)].std(axis=0))
-                    else:
-                        print "\t\tNo background shots excluded..."
-                    toc = time.time()
-                    times.append(toc - tic)
-                    print "\tAveraged %d hits in %.2f s" % (len(tags), toc - tic)
-                    print "\tSaving averaged data to '%s'..." % outputFileName
-                    tic = time.time()
-                    # xrays on and laser on
-                    if (xraysOnAndLaserOn).any():
-                        # create data groups
-                        od = outputDetectorGroup.create_group("data")
-                        odd = od.create_group("data")
-                        odt = od.create_group("temperature")
-                        # save data to data groups
-                        odd.create_dataset("mean", data=runDataMean[-1])
-                        odd.create_dataset("stdev", data=runDataStd[-1])
-                        odt.create_dataset("mean", data=runTemperatureMean[-1])
-                        odt.create_dataset("stdev", data=runTemperatureStd[-1])
-                        od.create_dataset("tags", data=tags[np.where(xraysOnAndLaserOn)])
-                    if (xraysOnAndLaserOnExcluded).any():
-                        # create data groups
-                        oe = outputDetectorGroup.create_group("excluded_data")
-                        oed = oe.create_group("data")
-                        oet = oe.create_group("temperature")
-                        # save data to data groups
-                        oed.create_dataset("mean", data=runDataExcludedMean[-1])
-                        oed.create_dataset("stdev", data=runDataExcludedStd[-1])
-                        oet.create_dataset("mean", data=runTemperatureExcludedMean[-1])
-                        oet.create_dataset("stdev", data=runTemperatureExcludedStd[-1])
-                        oe.create_dataset("tags", data=tags[np.where(xraysOnAndLaserOnExcluded)])
-                    # xrays on and laser off
-                    if (xraysOnAndLaserOff).any():
-                        # create data groups
-                        orf = outputDetectorGroup.create_group("reference")
-                        ord = orf.create_group("data")
-                        ort = orf.create_group("temperature")
-                        # save data to data groups
-                        ord.create_dataset("mean", data=runReferenceMean[-1])
-                        ord.create_dataset("stdev", data=runReferenceStd[-1])
-                        ort.create_dataset("mean", data=runRefTemperatureMean[-1])
-                        ort.create_dataset("stdev", data=runRefTemperatureStd[-1])
-                        orf.create_dataset("tags", data=tags[np.where(xraysOnAndLaserOff)])
-                    if (xraysOnAndLaserOffExcluded).any():
-                        # create data groups
-                        oer = outputDetectorGroup.create_group("excluded_reference")
-                        oed = oer.create_group("data")
-                        oet = oer.create_group("temperature")
-                        # save data to data groups
-                        oed.create_dataset("mean", data=runReferenceExcludedMean[-1])
-                        oed.create_dataset("stdev", data=runReferenceExcludedStd[-1])
-                        oet.create_dataset("mean", data=runRefTemperatureExcludedMean[-1])
-                        oet.create_dataset("stdev", data=runRefTemperatureExcludedStd[-1])
-                        oer.create_dataset("tags", data=tags[np.where(xraysOnAndLaserOffExcluded)])
-                    # xrays off
-                    if (xraysOff).any():
-                        # create data groups
-                        ob = outputDetectorGroup.create_group("background")
-                        obd = ob.create_group("data")
-                        obt = ob.create_group("temperature")
-                        # save data to data groups
-                        obd.create_dataset("mean", data=runBackgroundMean[-1])
-                        obd.create_dataset("stdev", data=runBackgroundStd[-1])
-                        obt.create_dataset("mean", data=runBGTemperatureMean[-1])
-                        obt.create_dataset("stdev", data=runBGTemperatureStd[-1])
-                        ob.create_dataset("tags", data=tags[np.where(xraysOff)])
-                    if (xraysOffExcluded).any():
-                        # create data groups
-                        oeb = outputDetectorGroup.create_group("excluded_background")
-                        oed = oeb.create_group("data")
-                        oet = oeb.create_group("temperature")
-                        # save data to data groups
-                        oed.create_dataset("mean", data=runBackgroundExcludedMean[-1])
-                        oed.create_dataset("stdev", data=runBackgroundExcludedStd[-1])
-                        oet.create_dataset("mean", data=runBGTemperatureExcludedMean[-1])
-                        oet.create_dataset("stdev", data=runBGTemperatureExcludedStd[-1])
-                        oeb.create_dataset("tags", data=tags[np.where(xraysOffExcluded)])
-                    toc = time.time()
-                    times.append(toc - tic)
-                    print "\tSaved data in %.2f s" % (toc - tic)
-                else:
-                    print "\tAveraging hits for '%s' as a function of %s..." % (d, motorsThatMoved[0])
-                    tic = time.time()
-                    # unordered set
-                    #motorValueSet = set(motorValues)
-                    # ordered set in original order
-                    motorValuesOrderedSet = OrderedSet(motorValues)
-                    motorValuesOrdered = []
-                    #for m, n in zip(motorValueSet, motorValueOrderedSet):
-                    #    print m, n
-                    if xraysOnAndLaserOn.any():
-                        taggedDetectorDataMean = []
-                        taggedDetectorDataStd = []
-                        taggedDetectorTemperatureMean = []
-                        taggedDetectorTemperatureStd = []
-                        includedTags = []
-                    else:
-                        print "\t\tNo laser hits included..."
-                    if xraysOnAndLaserOnExcluded.any():
-                        taggedDetectorDataExcludedMean = []
-                        taggedDetectorDataExcludedStd = []
-                        taggedDetectorTemperatureExcludedMean = []
-                        taggedDetectorTemperatureExcludedStd = []
-                        excludedTags = []
-                    else:
-                        print "\t\tNo laser hits excluded..."
-                    # xrays on and laser off
-                    if (xraysOnAndLaserOff).any():
-                        runReferenceMean.append(detectorData[np.where(xraysOnAndLaserOff)].mean(axis=0))
-                        runReferenceStd.append(detectorData[np.where(xraysOnAndLaserOff)].std(axis=0))
-                        runRefTemperatureMean.append(detectorTemperature[np.where(xraysOnAndLaserOff)].mean(axis=0))
-                        runRefTemperatureStd.append(detectorTemperature[np.where(xraysOnAndLaserOff)].std(axis=0))
-                    else:
-                        print "\t\tNo reference hits included..."
-                    if (xraysOnAndLaserOffExcluded).any():
-                        runReferenceExcludedMean.append(detectorData[np.where(xraysOnAndLaserOffExcluded)].mean(axis=0))
-                        runReferenceExcludedStd.append(detectorData[np.where(xraysOnAndLaserOffExcluded)].std(axis=0))
-                        runRefTemperatureExcludedMean.append(detectorTemperature[np.where(xraysOnAndLaserOffExcluded)].mean(axis=0))
-                        runRefTemperatureExcludedStd.append(detectorTemperature[np.where(xraysOnAndLaserOffExcluded)].std(axis=0))
-                    else:
-                        print "\t\tNo reference hits excluded..."
-                    # xrays off
-                    if (xraysOff).any():
-                        runBackgroundMean.append(detectorData[np.where(xraysOff)].mean(axis=0))
-                        runBackgroundStd.append(detectorData[np.where(xraysOff)].std(axis=0))
-                        runBGTemperatureMean.append(detectorTemperature[np.where(xraysOff)].mean(axis=0))
-                        runBGTemperatureStd.append(detectorTemperature[np.where(xraysOff)].std(axis=0))
-                    else:
-                        print "\t\tNo background shots included..."
-                    if (xraysOffExcluded).any():
-                        runBackgroundExcludedMean.append(detectorData[np.where(xraysOffExcluded)].mean(axis=0))
-                        runBackgroundExcludedStd.append(detectorData[np.where(xraysOffExcluded)].std(axis=0))
-                        runBGTemperatureExcludedMean.append(detectorTemperature[np.where(xraysOffExcluded)].mean(axis=0))
-                        runBGTemperatureExcludedStd.append(detectorTemperature[np.where(xraysOffExcluded)].std(axis=0))
-                    else:
-                        print "\t\tNo background shots excluded..."
-                    for m in motorValuesOrderedSet:
-                        if options.verbose:
-                            print "\tAveraging hits where %s = %.2e..." % (motorsThatMoved[0], m)
-                        motorValuesOrdered.append(m)
-                        tagsWithMotorValues = motorTags[np.where(motorValues == m)]
-                        indicesOfTagsWithMotorValues = np.zeros(tags.shape, dtype=np.bool)
-                        # sum together all indices that return true
-                        for t in tagsWithMotorValues:
-                            indicesOfTagsWithMotorValues += (tags == t)
-                        if xraysOnAndLaserOn.any():
-                            if (indicesOfTagsWithMotorValues & xraysOnAndLaserOn).any():
-                                taggedDetectorDataMean.append(detectorData[indicesOfTagsWithMotorValues & xraysOnAndLaserOn].mean(axis=0))
-                                taggedDetectorDataStd.append(detectorData[indicesOfTagsWithMotorValues & xraysOnAndLaserOn].std(axis=0))
-                                #taggedDetectorDataMean.append(np.mean(detectorData[np.where(indicesOfTagsWithMotorValues & xraysOnAndLaserOn)], axis=0))
-                                #taggedDetectorDataStd.append(np.mean(detectorData[np.where(indicesOfTagsWithMotorValues & xraysOnAndLaserOn)], axis=0))
-                                taggedDetectorTemperatureMean.append(detectorTemperature[indicesOfTagsWithMotorValues & xraysOnAndLaserOn].mean(axis=0))
-                                taggedDetectorTemperatureStd.append(detectorTemperature[indicesOfTagsWithMotorValues & xraysOnAndLaserOn].std(axis=0))
-                                includedTags.append([t for t in tags[indicesOfTagsWithMotorValues & xraysOnAndLaserOn]])
-                            else:
-                                if options.verbose:
-                                    print "\t\tNo included hits for %s = %.2e, appending zeros..." % (motorsThatMoved[0], m)
-                                taggedDetectorDataMean.append(np.zeros(detectorData[0].shape))
-                                taggedDetectorDataStd.append(np.zeros(detectorData[0].shape))
-                                taggedDetectorTemperatureMean.append(np.zeros(detectorTemperature[0].shape))
-                                taggedDetectorTemperatureStd.append(np.zeros(detectorTemperature[0].shape))
-                                includedTags.append(None)
-                        if xraysOnAndLaserOnExcluded.any():
-                            if (indicesOfTagsWithMotorValues & xraysOnAndLaserOnExcluded).any():
-                                taggedDetectorDataExcludedMean.append(detectorData[indicesOfTagsWithMotorValues & xraysOnAndLaserOnExcluded].mean(axis=0))
-                                taggedDetectorDataExcludedStd.append(detectorData[indicesOfTagsWithMotorValues & xraysOnAndLaserOnExcluded].std(axis=0))
-                                taggedDetectorTemperatureExcludedMean.append(detectorTemperature[indicesOfTagsWithMotorValues & xraysOnAndLaserOnExcluded].mean(axis=0))
-                                taggedDetectorTemperatureExcludedStd.append(detectorTemperature[indicesOfTagsWithMotorValues & xraysOnAndLaserOnExcluded].std(axis=0))
-                                excludedTags.append([t for t in tags[indicesOfTagsWithMotorValues & xraysOnAndLaserOnExcluded]])
-                            else:
-                                if options.verbose:
-                                    print "\t\tNo excluded hits for %s = %.2e, appending zeros..." % (motorsThatMoved[0], m)
-                                taggedDetectorDataExcludedMean.append(np.zeros(detectorData[0].shape))
-                                taggedDetectorDataExcludedStd.append(np.zeros(detectorData[0].shape))
-                                taggedDetectorTemperatureExcludedMean.append(np.zeros(detectorTemperature[0].shape))
-                                taggedDetectorTemperatureExcludedStd.append(np.zeros(detectorTemperature[0].shape))
-                                exludedTags.append(None)
-                    # save averaged data for each motor value to file
-                    toc = time.time()
-                    times.append(toc - tic)
-                    print "\tAveraged %d hits into %d bins in %.2f s" % (len(tags), len(motorValuesOrdered), toc - tic)
-                    print "\tSaving averaged data to '%s'..." % (outputFileName)
-                    tic = time.time()
-                    # xrays on and laser on
-                    if xraysOnAndLaserOn.any():
                         om = outputDetectorGroup.create_group(motorsThatMoved[0] + "_scan")
                         excludedPositions = 0
-                        for i in range(len(motorValuesOrdered)):
-                            if includedTags[i]:
+                        for m in range(len(motorValuesOrderedArray)):
+                            if detectorDataTags[m][0]:
                                 # create data groups
-                                omi = om.create_group("%04d" % (i - excludedPositions))
+                                omi = om.create_group("%04d" % (m - excludedPositions))
                                 od = omi.create_group("data")
                                 ot = omi.create_group("temperature")
                                 # save data to data groups
-                                od.create_dataset("mean", data=taggedDetectorDataMean[i])
-                                od.create_dataset("stdev", data=taggedDetectorDataStd[i])
-                                ot.create_dataset("mean", data=taggedDetectorTemperatureMean[i])
-                                ot.create_dataset("stdev", data=taggedDetectorTemperatureStd[i])
-                                omi.create_dataset("tags", data=includedTags[i])
-                                omi.create_dataset("motor_value", data=motorValuesOrdered[i])
-                            elif (not xraysOnAndLaserOffExcluded.any()) or (not excludedTags[i]):
+                                od.create_dataset("mean", data=runDataMean[runIndex][m])
+                                od.create_dataset("stdev", data=runDataStd[runIndex][m])
+                                ot.create_dataset("mean", data=runTemperatureMean[runIndex][m])
+                                ot.create_dataset("stdev", data=runTemperatureStd[runIndex][m])
+                                omi.create_dataset("tags", data=np.array(detectorDataTags[m][0], dtype=np.int64))
+                                omi.create_dataset("motor_value", data=motorValuesOrderedArray[m])
+                            elif not detectorDataTags[m][1]:
                                 excludedPositions += 1
-                    if xraysOnAndLaserOnExcluded.any():
+                # xrays on and laser on (excluded)
+                if anyExcludedDataHits:
+                    if averageAllHits:
+                    	# create data groups
+                    	oe = outputDetectorGroup.create_group("excluded_data")
+                    	oed = oe.create_group("data")
+                    	oet = oe.create_group("temperature")
+                    	# save data to data groups
+                    	oed.create_dataset("mean", data=runDataExcludedMean[runIndex])
+                    	oed.create_dataset("stdev", data=runDataExcludedStd[runIndex])
+                    	oet.create_dataset("mean", data=runTemperatureExcludedMean[runIndex])
+                    	oet.create_dataset("stdev", data=runTemperatureExcludedStd[runIndex])
+                    	oe.create_dataset("tags", data=np.array(detectorDataTags[1], dtype=np.int64))
+                    else:
                         om = outputDetectorGroup.require_group(motorsThatMoved[0] + "_scan")
                         excludedPositions = 0
-                        for i in range(len(motorValuesOrdered)):
-                            if excludedTags[i]:                            
+                        for m in range(len(motorValuesOrderedArray)):
+                            if detectorDataTags[m][1]:
                                 # create data groups
-                                omi = om.require_group('%04d' % (i - excludedPositions))
-                                oe = outputDetectorGroup.create_group("excluded_data")
+                                omi = om.require_group("%04d" % (m - excludedPositions))
+                                oe = omi.create_group("excluded_data")
                                 oed = oe.create_group("data")
                                 oet = oe.create_group("temperature")
                                 # save data to data groups
-                                oed.create_dataset("mean", data=taggedDetectorDataExcludedMean[-1])
-                                oed.create_dataset("stdev", data=taggedDetectorDataExcludedStd[-1])
-                                oet.create_dataset("mean", data=taggedDetectorTemperatureExcludedMean[-1])
-                                oet.create_dataset("stdev", data=taggedDetectorTemperatureExcludedStd[-1])
-                                oe.create_dataset("tags", data=excludedTags[i])
-                                omi.require_dataset("motor_value", data=motorValuesOrdered[i])
-                            elif (not xraysOnAndLaserOff.any()) or (not excludedTags[i]):
+                                oed.create_dataset("mean", data=runDataExcludedMean[runIndex][m])
+                                oed.create_dataset("stdev", data=runDataExcludedStd[runIndex][m])
+                                oet.create_dataset("mean", data=runTemperatureExcludedMean[runIndex][m])
+                                oet.create_dataset("stdev", data=runTemperatureExcludedStd[runIndex][m])
+                                oe.create_dataset("tags", data=np.array(detectorDataTags[m][1], dtype=np.int64))
+                                oe.create_dataset("motor_value", data=motorValuesOrderedArray[m])
+                            elif not detectorDataTags[m][0]:
                                 excludedPositions += 1
-                    # xrays on and laser off
-                    if (xraysOnAndLaserOff).any():
-                        # create data groups
-                        orf = outputDetectorGroup.create_group("reference")
-                        ord = orf.create_group("data")
-                        ort = orf.create_group("temperature")
-                        # save data to data groups
-                        ord.create_dataset("mean", data=runReferenceMean[-1])
-                        ord.create_dataset("stdev", data=runReferenceStd[-1])
-                        ort.create_dataset("mean", data=runRefTemperatureMean[-1])
-                        ort.create_dataset("stdev", data=runRefTemperatureStd[-1])
-                        orf.create_dataset("tags", data=tags[np.where(xraysOnAndLaserOff)])
-                    if (xraysOnAndLaserOffExcluded).any():
-                        # create data groups
-                        oer = outputDetectorGroup.create_group("excluded_reference")
-                        oed = oer.create_group("data")
-                        oet = oer.create_group("temperature")
-                        # save data to data groups
-                        oed.create_dataset("mean", data=runReferenceExcludedMean[-1])
-                        oed.create_dataset("stdev", data=runReferenceExcludedStd[-1])
-                        oet.create_dataset("mean", data=runRefTemperatureExcludedMean[-1])
-                        oet.create_dataset("stdev", data=runRefTemperatureExcludedStd[-1])
-                        oer.create_dataset("tags", data=tags[np.where(xraysOnAndLaserOffExcluded)])
-                    # xrays off
-                    if (xraysOff).any():
-                        # create data groups
-                        ob = outputDetectorGroup.create_group("background")
-                        obd = ob.create_group("data")
-                        obt = ob.create_group("temperature")
-                        # save data to data groups
-                        obd.create_dataset("mean", data=runBackgroundMean[-1])
-                        obd.create_dataset("stdev", data=runBackgroundStd[-1])
-                        obt.create_dataset("mean", data=runBGTemperatureMean[-1])
-                        obt.create_dataset("stdev", data=runBGTemperatureStd[-1])
-                        ob.create_dataset("tags", data=tags[np.where(xraysOff)])
-                    if (xraysOffExcluded).any():
-                        # create data groups
-                        oeb = outputDetectorGroup.create_group("excluded_background")
-                        oed = oeb.create_group("data")
-                        oet = oeb.create_group("temperature")
-                        # save data to data groups
-                        oed.create_dataset("mean", data=runBackgroundExcludedMean[-1])
-                        oed.create_dataset("stdev", data=runBackgroundExcludedStd[-1])
-                        oet.create_dataset("mean", data=runBGTemperatureExcludedMean[-1])
-                        oet.create_dataset("stdev", data=runBGTemperatureExcludedStd[-1])
-                        oeb.create_dataset("tags", data=tags[np.where(xraysOffExcluded)])
-                    toc = time.time()
-                    times.append(toc - tic)
-                    print "\tSaved data in %.2f s" % (toc - tic)
+                # xrays on and laser off
+                if anyReferenceHits:
+                    # create data groups
+                    orf = outputDetectorGroup.create_group("reference")
+                    ord = orf.create_group("data")
+                    ort = orf.create_group("temperature")
+                    # save data to data groups
+                    ord.create_dataset("mean", data=runReferenceMean[runIndex])
+                    ord.create_dataset("stdev", data=runReferenceStd[runIndex])
+                    ort.create_dataset("mean", data=runRefTemperatureMean[runIndex])
+                    ort.create_dataset("stdev", data=runRefTemperatureStd[runIndex])
+                    orf.create_dataset("tags", data=np.array(detectorReferenceTags[0], dtype=np.int64))
+                # xrays on and laser off (excluded)
+                if anyExcludedReferenceHits:
+                    # create data groups
+                    oer = outputDetectorGroup.create_group("excluded_reference")
+                    oed = oer.create_group("data")
+                    oet = oer.create_group("temperature")
+                    # save data to data groups
+                    oed.create_dataset("mean", data=runReferenceExcludedMean[runIndex])
+                    oed.create_dataset("stdev", data=runReferenceExcludedStd[runIndex])
+                    oet.create_dataset("mean", data=runRefTemperatureExcludedMean[runIndex])
+                    oet.create_dataset("stdev", data=runRefTemperatureExcludedStd[runIndex])
+                    oer.create_dataset("tags", data=np.array(detectorReferenceTags[1], dtype=np.int64))
+                # xrays off
+                if anyBackgroundShots:
+                    # create data groups
+                    ob = outputDetectorGroup.create_group("background")
+                    obd = ob.create_group("data")
+                    obt = ob.create_group("temperature")
+                    # save data to data groups
+                    obd.create_dataset("mean", data=runBackgroundMean[runIndex])
+                    obd.create_dataset("stdev", data=runBackgroundStd[runIndex])
+                    obt.create_dataset("mean", data=runBGTemperatureMean[runIndex])
+                    obt.create_dataset("stdev", data=runBGTemperatureStd[runIndex])
+                    ob.create_dataset("tags", data=np.array(detectorBackgroundTags[0], dtype=np.int64))
+                # xrays off (excluded)
+                if anyExcludedBackgroundShots:
+                    # create data groups
+                    oeb = outputDetectorGroup.create_group("excluded_background")
+                    oed = oeb.create_group("data")
+                    oet = oeb.create_group("temperature")
+                    # save data to data groups
+                    oed.create_dataset("mean", data=runBackgroundExcludedMean[runIndex])
+                    oed.create_dataset("stdev", data=runBackgroundExcludedStd[runIndex])
+                    oet.create_dataset("mean", data=runBGTemperatureExcludedMean[runIndex])
+                    oet.create_dataset("stdev", data=runBGTemperatureExcludedStd[runIndex])
+                    oeb.create_dataset("tags", data=np.array(detectorBackgroundTags[1], dtype=np.int64))
+                toc = time.time()
+                times.append(toc - tic)
+                print "\tSaved data in %.2f s" % (toc - tic)
+            detectorIndex += 1
         runIndex += 1
     f.close()
     o.close()
