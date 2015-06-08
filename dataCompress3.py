@@ -22,6 +22,7 @@ parser.add_option("-c", "--csvFile", action="store", type="string", dest="csvFil
 parser.add_option("-o", "--outputFile", action="store", type="string", dest="outputFile", help="Output HDF5/CXIDB file that the compressed data is written to (default: XXXXXX_compressed.h5/cxi, where XXXXXX.h5 is the input HDF5 file)", metavar="FILENAME", default="")
 parser.add_option("-d", "--detector", action="store", type="string", dest="detector", help="Detector name that should be compressed (default: all)", metavar="DETECTORNAME", default="")
 parser.add_option("-r", "--run", action="store", type="int", dest="runNumber", help="Run number to compress (default: all in input HDF5 file)", metavar="RUNNUMBER", default=0)
+parser.add_option("-n", "--nshots", action="store", type="int", dest="nShots", help="Number of shots to compress (default: all in input HDF5 file)", metavar="SHOTS", default=0)
 parser.add_option("-a", "--average", action="store_true", dest="average", help="Save averages to output HDF5 file", default=False)
 parser.add_option("-x", "--cxidb", action="store_true", dest="cxidb", help="Save averages and individual shots to output CXIDB file", default=False)
 parser.add_option("-v", "--verbose", action="store_true", dest="verbose", help="Output additional information to screen", default=False)
@@ -116,10 +117,13 @@ if options.inputFile != '' and os.path.exists(options.inputFile):
             else:
                 print "No motor moved during run, all hits will be averaged."
                 averageAllHits = True
-            xraysOn = csvDict['XFEL shutter'].astype(np.bool)
-            laserOn = csvDict['Laser shutter'].astype(np.bool)
-            #xraysOn = csvDict['XFEL shutter'].astype(np.bool)[:501]
-            #laserOn = csvDict['Laser shutter'].astype(np.bool)[:501]
+            # this is used to break the script for testing after a certain amount of shots
+            if options.nShots > 0:
+                xraysOn = csvDict['XFEL shutter'].astype(np.bool)[:options.nShots]
+                laserOn = csvDict['Laser shutter'].astype(np.bool)[:options.nShots]
+            else:
+                xraysOn = csvDict['XFEL shutter'].astype(np.bool)
+                laserOn = csvDict['Laser shutter'].astype(np.bool)
     else:
         print "CSV file '%s' does not exist, aborting..." % csvFileName
         sys.exit(1)
@@ -223,7 +227,8 @@ if options.inputFile != '' and os.path.exists(options.inputFile):
                         print "\tCopying detector info for %s to '%s'..." % (d, outputFileName)
                         # copy whole detector info group to new file
                         f.copy(pt, outputDetectorGroup)
-                        print "\tReading detector data for %d tag(s)..." % (len(detectorKeys) - 1)
+                        #print "\tReading detector data for %d tag(s)..." % (len(detectorKeys) - 1)
+                        print "\tReading %s data..." % d
                         tic = time.time()
                     elif "tag" in t:
                         if options.verbose:
@@ -232,17 +237,24 @@ if options.inputFile != '' and os.path.exists(options.inputFile):
                         tagNumber = np.int64((re.sub('tag_', '', t)))
                         tags.append(tagNumber)
                         tagCounter += 1
+                        # input data is 32-bit so should be natively saved as float-32,
+                        # since there is no time difference in explicitly stating np.float32,
+                        # but the time to iterate over tags increases by a factor 2 when explicitly stating np.float64
                         detectorData.append(np.array(f[pt + '/detector_data']))
+                        #detectorData.append(np.array(f[pt + '/detector_data'], dtype=np.float64))
                         detectorStatus.append(f[pt + '/detector_status'].value)
                         detectorTemperature.append(f[pt + '/temperature'].value)
-                    #if tagCounter > 500:
-                    #    break
+                    # this is used to break the script for testing
+                    if (options.nShots > 0) and (tagCounter >= options.nShots):
+                        break
                 toc = time.time()
                 times.append(toc - tic)
                 print "\tRead detector data for %d tags in %.2f s" % (tagCounter, toc - tic)
                 print "\tConverting data for '%s' to internal arrays..." % d
                 tic = time.time()
-                detectorData = np.array(detectorData, dtype=np.float)
+                # save as np.float32 since input data is 32-bit and we want to save memory
+                detectorData = np.array(detectorData, dtype=np.float32)
+                #detectorData = np.array(detectorData, dtype=np.float64)
                 detectorStatus = np.array(detectorStatus, dtype=np.int)
                 detectorTemperature = np.array(detectorTemperature, dtype=np.float)
                 tags = np.array(tags)
@@ -571,6 +583,7 @@ if options.inputFile != '' and os.path.exists(options.inputFile):
                     toc = time.time()
                     times.append(toc - tic)
                     print "\tSaved data in %.2f s" % (toc - tic)
+        runIndex += 1
     f.close()
     o.close()
     totalTime = np.sum(times)
