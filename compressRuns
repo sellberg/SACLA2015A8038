@@ -1,0 +1,61 @@
+#!/home/doniach/dermen/epd731/bin/python
+import os
+import sys
+
+from argparse import ArgumentParser
+
+parser = ArgumentParser()
+parser = ArgumentParser(description='Convert run data from the detector server to the analysis servers, saving the reconstructed images. This uses DataConvert3.')
+
+parser.add_argument("-start", "--start-run",  type=int, dest="start",required=True, 
+                help="first run to compress" )
+parser.add_argument("-stop", "--stop-run", type=int, dest="stop",required=True ,
+                help="last run to compress (if you only want to compress 1 run, then start should = stop" )
+parser.add_argument("-o", "--outputFlag", type=str, dest="outputFlag", 
+                help="Where to run the dataCompress3.py. 'W' refers to /work/perakis/ and 'UD' refers to '/UserData/fperakis'",
+                choices=['W','UD'], default='W')
+
+args = parser.parse_args()
+
+# where you want the output run h5 file to be stored
+if args.outputFlag == 'W':
+    outdir = '/work/fperakis/'
+elif args.outputFlag == 'UD':
+    outdir = '/UserData/fperakis/'
+    print "Running dataCompress3.py in '%s' is currently not supported..." % outdir
+    sys.exit(1)
+
+log_dump = '/home/fperakis/qsub_dump/compressed/'
+
+assert( args.stop >= args.start )
+
+for run in xrange( args.start, args.stop+1 ):
+    RUN = str(run) # run number as string
+
+    #runFile = os.path.join( outdir, '%s.h5'%RUN )
+    #warning_msg = 'File "%s" already exists! Please delete/rename it and try again.'%runFile
+    #assert( not os.path.exists( runFile) ) , warning_msg
+
+#   create a batchfile as a string (first line)
+    batchFile  =  '#PBS -N %s_compress\n'%RUN
+    batchFile +=  '#PBS -d %s\n'%log_dump
+#   second line is the command
+    cmd = ['python2.7 %sdataCompress3.py -f %s.h5 -a'% (outdir, RUN)]
+
+    batchFile = batchFile + ' '.join(cmd)
+
+#   save a temp  bacthfile and direct it to qsub
+    outfile = open('tmpc.batch', 'w')
+    outfile.write( batchFile)
+    outfile.close()
+
+    os.system( 'qsub < tmpc.batch' )
+
+os.remove( 'tmpc.batch')
+
+# check the status of the submitted job using:
+# 'qstat'
+# check output of the submitted job using:
+# 'tail /home/fperakis/qsub_dump/compressed/%S_compress.o*'
+# check error of the submitted job using:
+# 'tail /home/fperakis/qsub_dump/compressed/%S_compress.e*'
