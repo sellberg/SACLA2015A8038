@@ -11,6 +11,8 @@ parser.add_argument("-start", "--start-run",  type=int, dest="start",required=Tr
                 help="first run to compress" )
 parser.add_argument("-stop", "--stop-run", type=int, dest="stop",required=True ,
                 help="last run to compress (if you only want to compress 1 run, then start should = stop" )
+parser.add_argument("-multi", "--multi-run", action="store_true", dest="multi", required=False, default=False,
+                help="compress multi-file run converted using DataConvert4" )
 parser.add_argument("-o", "--outputFlag", type=str, dest="outputFlag", 
                 help="Where to run the dataCompress3.py. 'W' refers to /work/perakis/ and 'UD' refers to '/UserData/fperakis'",
                 choices=['W','UD'], default='W')
@@ -40,7 +42,10 @@ for run in xrange( args.start, args.stop+1 ):
     batchFile  =  '#PBS -N %s_compress\n'%RUN
     batchFile +=  '#PBS -d %s\n'%log_dump
 #   second line is the command
-    cmd = ['python2.7 %sdataCompress3.py -f %s.h5 -a'% (outdir, RUN)]
+    if args.multi:
+        cmd = ['python2.7 %sdataCompress3.py -f %s -a -v -u -m'% (outdir, RUN)]
+    else:
+        cmd = ['python2.7 %sdataCompress3.py -f %s.h5 -a -v -u'% (outdir, RUN)]
 
     batchFile = batchFile + ' '.join(cmd)
 

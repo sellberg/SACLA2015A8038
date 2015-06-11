@@ -1,12 +1,12 @@
-#!/usr/bin/env python
+#!/home/doniach/dermen/epd731/bin/python
 
 import numpy as np
 import h5py as h
 import glob as g
 import matplotlib
 import matplotlib.pyplot as plt
-import csv, sys, os, re, shutil, subprocess, time
-from OrderedSet import OrderedSet
+import gc, csv, sys, os, re, shutil, subprocess, time
+#from OrderedSet import OrderedSet
 from optparse import OptionParser
 
 """
@@ -17,12 +17,13 @@ from optparse import OptionParser
 """
 
 parser = OptionParser()
-parser.add_option("-f", "--inputFile", action="store", type="string", dest="inputFile", help="Input HDF5 file produced by DataConvert3", metavar="FILENAME", default="")
+parser.add_option("-f", "--inputFile", action="store", type="string", dest="inputFile", help="Input HDF5 file produced by DataConvert3 or input HDF5 file directory produced by DataConvert4 (requires multi options)", metavar="FILENAME", default="")
 parser.add_option("-c", "--csvFile", action="store", type="string", dest="csvFile", help="Input CSV spreadsheet from the scan output (default: XXXXXX.csv, where XXXXXX.h5 is the input HDF5 file)", metavar="FILENAME", default="")
 parser.add_option("-o", "--outputFile", action="store", type="string", dest="outputFile", help="Output HDF5/CXIDB file that the compressed data is written to (default: XXXXXX_compressed.h5/cxi, where XXXXXX.h5 is the input HDF5 file)", metavar="FILENAME", default="")
 parser.add_option("-d", "--detector", action="store", type="string", dest="detector", help="Detector name that should be compressed (default: all)", metavar="DETECTORNAME", default="")
 parser.add_option("-r", "--run", action="store", type="int", dest="runNumber", help="Run number to compress (default: all in input HDF5 file)", metavar="RUNNUMBER", default=0)
 parser.add_option("-n", "--nshots", action="store", type="int", dest="nShots", help="Number of shots to compress (default: all in input HDF5 file)", metavar="SHOTS", default=0)
+parser.add_option("-m", "--multi", action="store_true", dest="multi", help="Multiple input HDF5 files from DataConvert4", default=False)
 parser.add_option("-a", "--average", action="store_true", dest="average", help="Save averages to output HDF5 file", default=False)
 parser.add_option("-x", "--cxidb", action="store_true", dest="cxidb", help="Save averages and individual shots to output CXIDB file", default=False)
 parser.add_option("-t", "--temperature", action="store_true", dest="temperature", help="Save temperature data to output HDF5 file", default=False)
@@ -42,8 +43,11 @@ parser.add_option("-v", "--verbose", action="store_true", dest="verbose", help="
 ##############################################
 csv_dir = "/work/fperakis/csv/scan_output/"
 #csv_dir = ""
-source_dir = "/UserData/fperakis/"
-#source_dir = ""
+if options.multi:
+    source_dir = "/work/fperakis/fastConvert/Dataget/run"
+else:
+    source_dir = "/UserData/fperakis/"
+    #source_dir = ""
 working_dir = "/work/fperakis/output/"
 #working_dir = ""
 original_dir = os.getcwd() + '/'
@@ -51,8 +55,9 @@ original_dir = os.getcwd() + '/'
 if not os.path.exists(source_dir + options.inputFile):
     source_dir = working_dir
 
-# update csv directory
-os.system("rsync --ignore-existing fep:/xdaq/work/share/fperakis/scan_output/*.csv /UserData/fperakis/csv/scan_output/.")
+if options.update:
+    # update csv directory
+    os.system("rsync --update fep:/xdaq/work/share/fperakis/scan_output/*.csv /UserData/fperakis/csv/scan_output/.")
 
 # PARAMETERS
 tagIdentifier = 'Tagnumber'
@@ -68,7 +73,7 @@ def removeStandardParameters(parameterList):
     """
     standardParameters = ['SCAN_ID', 'Run number', 'Tagnumber', 'XFEL shutter', 'Laser shutter'] + motorsToIgnore
     standardParameterSet = set(standardParameters)
-    standardParameterSet.update(motorsToIgnore)
+    #standardParameterSet.update(motorsToIgnore)
     output = []
     for p in parameterList:
         standardParameterSet.add(p)
@@ -78,7 +83,7 @@ def removeStandardParameters(parameterList):
     return output
 
 
-if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
+if options.inputFile != '' and (os.path.exists(source_dir + options.inputFile)):
     i = re.split('\W+', options.inputFile)
     if (len(i) > 2 and (options.csvFile == '' or options.outputFile == '')):
         print "Input filename '%s' does not match run number to automatically produce CSV or output filename, aborting..."
@@ -89,6 +94,13 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
         csvFileName = options.csvFile
     else:
         csvFileName = basename + '.csv'
+    # Dermens hot fix for csv file name error
+    if not os.path.exists(csv_dir + csvFileName):
+        if os.path.exists(csv_dir + csvFileName.replace('347', '3474')):
+            csvFileName = csvFileName.replace('347', '3474')
+            print "Changed CSV filename to %s" % csvFileName
+        else:
+            print "Cannot find CSV filename %s" % csvFileName
     if os.path.exists(csv_dir + csvFileName):
         times = []
         print "Reading scan parameters from '%s'..." % (csvFileName)
@@ -124,11 +136,13 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
                 # unordered set
                 #motorValuesSet = set(motorValues)
                 # ordered set (original order)
-                motorValuesOrderedSet = OrderedSet(motorValues)
-                motorValuesOrderedArray = []
-                for m in motorValuesOrderedSet:
-                    motorValuesOrderedArray.append(m)
-                motorValuesOrderedArray = np.array(motorValuesOrderedArray)
+                #motorValuesOrderedSet = OrderedSet(motorValues)
+                #motorValuesOrderedArray = []
+                #for m in motorValuesOrderedSet:
+                #    motorValuesOrderedArray.append(m)
+                #motorValuesOrderedArray = np.array(motorValuesOrderedArray)
+                # find unique motor values
+                motorValuesOrderedArray = np.unique(motorValues)
             elif (len(motorsThatMoved > 1)):
                 print "Several motors moved at once during run, aborting..."
                 sys.exit(1)
@@ -137,7 +151,15 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
                 averageAllHits = True
             xraysStatus = csvDict['XFEL shutter']
             laserStatus = csvDict['Laser shutter']
+            #print "SWD_X"
+            #print csvDict['PM_EH2_26']
+            #print "SWD_Y"
+            #print csvDict['PM_EH2_27']
+            #print "SWD_Z"
+            #print csvDict['PM_EH2_28']
+            #sys.exit()
     elif options.average:
+        print "No CSV file was found, averaging all hits."
         averageAllHits = True
         times = []
         tic = time.time()
@@ -147,7 +169,23 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
     
     print "Reading data from '%s'..." % (options.inputFile)
     # open input h5 file
-    f = h.File(source_dir + options.inputFile, "r")
+    if options.multi:
+        inputDir = source_dir + options.inputFile + '/MapData/'
+        # unsorted
+        inputFiles = np.array(g.glob(inputDir + options.inputFile + '*.h5'))
+        inputFileNumbers = []
+        for i in range(len(inputFiles)):
+            # extract file number from file name so the input files can be sorted
+            inputFileNumbers.append(int(re.sub(options.inputFile + '_', '', re.split('\W+', inputFiles[i])[-2])))
+        # sorted
+        sortedInputFiles = inputFiles[np.argsort(np.array(inputFileNumbers))]
+        print "\tFound %d files, accessing '%s'..." % (len(inputFiles), sortedInputFiles[0])
+        #print inputFiles
+        f = h.File(sortedInputFiles[0], "r")
+        nFiles = len(inputFiles)
+        iFiles = 1
+    else:
+        f = h.File(source_dir + options.inputFile, "r")
     # open output file
     if options.outputFile == '':
         outputFileName = basename + '_compressed.h5'
@@ -156,20 +194,12 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
             sys.exit(1)
     else:
         outputFileName = options.outputFile
-    #outputFileExists = os.path.exists(options.outputFile)
-    #o = h.File(working_dir + outputFileName, "a")
-    outputFileExists = False
+    outputFileExists = os.path.exists(working_dir + outputFileName)
     if outputFileExists:
-        # NOT USED, FIX IF WE WANT TO USE
-        print "Output file '%s' already exists, appending data to file..." % outputFileName
-        if options.model and o.get(outputModelPath):
-            print "\tremoving '/%s' in %s..." % (outputModelPath, options.outputFile)
-            del o[outputModelPath]
-        if options.tags and o.get(outputTagsPath):
-            print "\tremoving '/%s' in %s..." % (outputTagsPath, options.outputFile)
-            del o[outputTagsPath]
+        print "Output file '%s' already exists, deleting existing file..." % outputFileName
     else:
         print "Creating file structure in '%s'..." % outputFileName
+    #o = h.File(working_dir + outputFileName, "a")
     o = h.File(working_dir + outputFileName, "w")
     
     runList = np.array(f['file_info/run_number_list'])
@@ -184,6 +214,8 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
             sys.exit(1)
     toc = time.time()
     times.append(toc - tic)
+    # enable garbage collector to clean up memory
+    gc.enable()
     runIndex = 0
     #averageAllHits = True
     for r in runList:
@@ -201,7 +233,11 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
         if averageAllHits:
             xraysStatus = np.array(f[inputPath + '/event_info/bl_3/eh_1/xfel_pulse_selector_status'])
             laserStatus = np.array(f[inputPath + '/event_info/bl_3/lh_1/laser_pulse_selector_status'])
+        if f.get(inputPath + '/event_info/acc/accelerator_status'):
             beamStatus = np.array(f[inputPath + '/event_info/acc/accelerator_status'])
+        else:
+            print "Accelerator status data located in '%s' is missing, aborting..." % (inputPath + '/event_info/acc/accelerator_status')
+            sys.exit()
         # data
         runDataMean = []
         runDataStd = []
@@ -241,7 +277,7 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
             p = inputPath + '/' + d
             if "info" in d:
                 print "\tCopying %s for %s to '%s'..." % (d, r, outputFileName)
-                # copy whole detector info group to new file
+                # copy all info groups to new file
                 f.copy(p, outputRunGroup)
             if "detector" in d:
                 detectorKeys = np.array(f[p].keys())
@@ -292,6 +328,7 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
                 anyExcludedReferenceHits = False
                 anyBackgroundShots = False
                 anyExcludedBackgroundShots = False
+                anyDetectorStatus = True
                 tags = []
                 tagCounter = 0
                 for t in detectorKeys:
@@ -311,13 +348,20 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
                             tagIndex = tagCounter
                         else:
                             tagIndex = np.where(motorTags == tagNumber)
-                        detectorStatus = f[pt + '/detector_status'].value
+                            #print "index = %d, counter = %d" % (tagIndex[0], tagCounter)
+                        if f.get(pt + '/detector_status'):
+                            detectorStatus = f[pt + '/detector_status'].value
+                        else:
+                            if anyDetectorStatus:
+                                print "\tDetector status is not available for %s, only excluding hits with negative beam status..." % d
+                                anyDetectorStatus = False
+                            detectorStatus = 1
                         # save data and temperature as 64-bit for sum and squared sum to avoid rounding errors when calculating stdev
                         detectorData = np.array(f[pt + '/detector_data'], dtype=np.float64)
                         if options.temperature:
                             detectorTemperature = np.float64(f[pt + '/temperature'].value)
                         # xrays on and laser on
-                        if ((detectorStatus == 1) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 1)):
+                        if ((detectorStatus == 1) and (beamStatus[tagCounter] == 1) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 1)):
                             anyDataHits = True
                             if averageAllHits:
                                 detectorDataTags[0].append(tagNumber)
@@ -355,7 +399,7 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
                                 if options.verbose:
                                     print "\t\t[%d] hit (%s = %.2e)" % (tagNumber, motorsThatMoved[0], motorValues[tagIndex])
                         # xrays on and laser on (excluded)
-                        elif ((detectorStatus == 0) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 1)):
+                        elif (((detectorStatus == 0) or (beamStatus[tagCounter] == 0)) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 1)):
                             anyExcludedDataHits = True
                             if averageAllHits:
                                 detectorDataTags[1].append(tagNumber)
@@ -382,7 +426,6 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
                                         detectorTemperatureExcludedSum = np.zeros(len(motorValuesOrderedArray), dtype=np.float64)
                                         detectorTemperatureExcludedSquaredSum = np.zeros(len(motorValuesOrderedArray), dtype=np.float64)
                                 motorValuesOrderedIndex = np.where(motorValuesOrderedArray == motorValues[tagIndex])
-                                print motorValuesOrderedIndex[0]
                                 detectorDataTags[motorValuesOrderedIndex][1].append(tagNumber)
                                 detectorDataExcludedSum[motorValuesOrderedIndex] += detectorData
                                 detectorDataExcludedSquaredSum[motorValuesOrderedIndex] += detectorData*detectorData
@@ -392,7 +435,7 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
                                 if options.verbose:
                                     print "\t\t[%d] excluded hit (%s = %.2e)" % (tagNumber, motorsThatMoved[0], motorValues[tagIndex])
                         # xrays on and laser off
-                        elif ((detectorStatus == 1) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 0)):
+                        elif ((detectorStatus == 1) and (beamStatus[tagCounter] == 1) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 0)):
                             anyReferenceHits = True
                             detectorReferenceTags[0].append(tagNumber)
                             if detectorReferenceSum.any():
@@ -410,7 +453,7 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
                             if options.verbose:
                                 print "\t\t[%d] reference hit" % tagNumber
                         # xrays on and laser off (excluded)
-                        elif ((detectorStatus == 0) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 0)):
+                        elif (((detectorStatus == 0) or (beamStatus[tagCounter] == 0)) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 0)):
                             anyExcludedReferenceHits = True
                             detectorReferenceTags[1].append(tagNumber)
                             if detectorReferenceExcludedSum.any():
@@ -428,7 +471,7 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
                             if options.verbose:
                                 print "\t\t[%d] excluded reference hit" % tagNumber
                         # xrays off
-                        elif ((detectorStatus == 1) and (xraysStatus[tagIndex] == 0)):
+                        elif ((detectorStatus == 1) and (beamStatus[tagCounter] == 1) and (xraysStatus[tagIndex] == 0)):
                             anyBackgroundShots = True
                             detectorBackgroundTags[0].append(tagNumber)
                             if detectorBackgroundSum.any():
@@ -446,7 +489,7 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
                             if options.verbose:
                                 print "\t\t[%d] background shot" % tagNumber
                         # xrays off (excluded)
-                        elif ((detectorStatus == 0) and (xraysStatus[tagIndex] == 0)):
+                        elif (((detectorStatus == 0) or (beamStatus[tagCounter] == 0)) and (xraysStatus[tagIndex] == 0)):
                             anyExcludedBackgroundShots = True
                             detectorBackgroundTags[1].append(tagNumber)
                             if detectorBackgroundExcludedSum.any():
@@ -472,6 +515,211 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
                     # this is used to break the script for testing
                     if (options.nShots > 0) and (tagCounter >= options.nShots):
                         break
+                    # collect unused memory to avoid 'High memory usage errors'
+                    gc.collect()
+                if options.multi:
+                    while (iFiles < nFiles):
+                        toc = time.time()
+                        times.append(toc - tic)
+                        print "\tRead detector data for %d tags in %.2f s" % (tagCounter, toc - tic)
+                        f.close()
+                        print "\tClosing '%s', accessing '%s'..." % (sortedInputFiles[iFiles - 1], sortedInputFiles[iFiles])
+                        f = h.File(sortedInputFiles[iFiles], "r")
+                        tic = time.time()
+                        # get new tag names
+                        detectorKeys = np.array(f[p].keys())
+                        # get new beam status
+                        if averageAllHits:
+                            xraysStatus = np.array(f[inputPath + '/event_info/bl_3/eh_1/xfel_pulse_selector_status'])
+                            laserStatus = np.array(f[inputPath + '/event_info/bl_3/lh_1/laser_pulse_selector_status'])
+                        if f.get(inputPath + '/event_info/acc/accelerator_status'):
+                            beamStatus = np.array(f[inputPath + '/event_info/acc/accelerator_status'])
+                        else:
+                            print "Accelerator status data located in '%s' is missing in '%s', aborting..." % (inputPath + '/event_info/acc/accelerator_status', sortedInputFiles[iFiles])
+                            sys.exit()
+                        # continue counting tags
+                        tagCounterOffset = tagCounter
+                        if (options.nShots <= 0) or (tagCounter < options.nShots):
+                	    for t in detectorKeys:
+                	        pt = p + '/' + t
+                	        if "tag" in t:
+                	            # np.int might be too small for ~9 digit integer (32-bit has ~10 digits precision), going for 64-bit
+                	            tagNumber = np.int64((re.sub('tag_', '', t)))
+                	            tags.append(tagNumber)
+                	            if averageAllHits:
+                	                tagIndex = tagCounter - tagCounterOffset
+                	            else:
+                	                tagIndex = np.where(motorTags == tagNumber)
+
+                                        if f.get(pt + '/detector_status'):
+                                            detectorStatus = f[pt + '/detector_status'].value
+                                        else:
+                                            if anyDetectorStatus:
+                                                print "\tDetector status is not available for %s, only excluding hits with negative beam status..." % d
+                                                anyDetectorStatus = False
+                                            detectorStatus = 1
+                	            # save data and temperature as 64-bit for sum and squared sum to avoid rounding errors when calculating stdev
+                	            detectorData = np.array(f[pt + '/detector_data'], dtype=np.float64)
+                	            if options.temperature:
+                	                detectorTemperature = np.float64(f[pt + '/temperature'].value)
+                	            # xrays on and laser on
+                	            if ((detectorStatus == 1) and (beamStatus[tagCounter - tagCounterOffset] == 1) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 1)):
+                	                anyDataHits = True
+                	                if averageAllHits:
+                	                    detectorDataTags[0].append(tagNumber)
+                                            if detectorDataSum.any():
+                                                detectorDataSum += detectorData
+                                                detectorDataSquaredSum += detectorData*detectorData
+                                                if options.temperature:
+                	                            detectorTemperatureSum += detectorTemperature
+                	                            detectorTemperatureSquaredSum += detectorTemperature*detectorTemperature
+                	                	else:
+                	                        # create regular 2D array for sum if all hits are averaged
+                	                	    detectorDataSum = detectorData
+                	                	    detectorDataSquaredSum = detectorData*detectorData
+                	                        if options.temperature:
+                	                            detectorTemperatureSum = detectorTemperature
+                	                            detectorTemperatureSquaredSum = detectorTemperature*detectorTemperature
+                	                    if options.verbose:
+                	                        print "\t\t[%d] hit" % tagNumber
+                	                else:
+                                            if not detectorDataSum.any():
+                                                # create 3D array for sum with first index being the scan motor position
+                                                detectorDataSum = np.zeros((len(motorValuesOrderedArray),) + detectorData.shape, dtype=np.float64)
+                                                detectorDataSquaredSum = np.zeros((len(motorValuesOrderedArray),) + detectorData.shape, dtype=np.float64)
+                	                        if options.temperature:
+                	                            detectorTemperatureSum = np.zeros(len(motorValuesOrderedArray), dtype=np.float64)
+                	                            detectorTemperatureSquaredSum = np.zeros(len(motorValuesOrderedArray), dtype=np.float64)
+                	                    # get rid of wrapping tuple so index works in list as well as numpy array
+                	                    motorValuesOrderedIndex = np.where(motorValuesOrderedArray == motorValues[tagIndex])[0]
+                	                    detectorDataTags[motorValuesOrderedIndex][0].append(tagNumber)
+                	                    detectorDataSum[motorValuesOrderedIndex] += detectorData
+                	                    detectorDataSquaredSum[motorValuesOrderedIndex] += detectorData*detectorData
+                	                    if options.temperature:
+                	                        detectorTemperatureSum[motorValuesOrderedIndex] += detectorTemperature
+                	                        detectorTemperatureSquaredSum[motorValuesOrderedIndex] += detectorTemperature*detectorTemperature
+                	                    if options.verbose:
+                	                        print "\t\t[%d] hit (%s = %.2e)" % (tagNumber, motorsThatMoved[0], motorValues[tagIndex])
+                	            # xrays on and laser on (excluded)
+                	            elif (((detectorStatus == 0) or (beamStatus[tagCounter - tagCounterOffset] == 0)) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 1)):
+                	                anyExcludedDataHits = True
+                	                if averageAllHits:
+                	                    detectorDataTags[1].append(tagNumber)
+                                            if detectorDataExcludedSum.any():
+                                                detectorDataExcludedSum += detectorData
+                                                detectorDataExcludedSquaredSum += detectorData*detectorData
+                	                        if options.temperature:
+                	                            detectorTemperatureExcludedSum += detectorTemperature
+                	                            detectorTemperatureExcludedSquaredSum += detectorTemperature*detectorTemperature
+                                            else:
+                                                detectorDataExcludedSum = detectorData
+                                                detectorDataExcludedSquaredSum = detectorData*detectorData
+                	                        if options.temperature:
+                	                            detectorTemperatureExcludedSum = detectorTemperature
+                	                            detectorTemperatureExcludedSquaredSum = detectorTemperature*detectorTemperature
+                	                    if options.verbose:
+                	                        print "\t\t[%d] excluded hit" % tagNumber
+                	                else:
+                                            if not detectorDataExcludedSum.any():
+                	                        # create 3D array for sum with first index being the scan motor position
+                                                detectorDataExcludedSum = np.zeros((len(motorValuesOrderedArray),) + detectorData.shape, dtype=np.float64)
+                                                detectorDataExcludedSquaredSum = np.zeros((len(motorValuesOrderedArray),) + detectorData.shape, dtype=np.float64)
+                	                        if options.temperature:
+                	                            detectorTemperatureExcludedSum = np.zeros(len(motorValuesOrderedArray), dtype=np.float64)
+                	                            detectorTemperatureExcludedSquaredSum = np.zeros(len(motorValuesOrderedArray), dtype=np.float64)
+                	                    motorValuesOrderedIndex = np.where(motorValuesOrderedArray == motorValues[tagIndex])
+                	                    detectorDataTags[motorValuesOrderedIndex][1].append(tagNumber)
+                	                    detectorDataExcludedSum[motorValuesOrderedIndex] += detectorData
+                	                    detectorDataExcludedSquaredSum[motorValuesOrderedIndex] += detectorData*detectorData
+                	                    if options.temperature:
+                	                        detectorTemperatureExcludedSum[motorValuesOrderedIndex] += detectorTemperature
+                	                        detectorTemperatureExcludedSquaredSum[motorValuesOrderedIndex] += detectorTemperature*detectorTemperature
+                	                    if options.verbose:
+                	                        print "\t\t[%d] excluded hit (%s = %.2e)" % (tagNumber, motorsThatMoved[0], motorValues[tagIndex])
+                	            # xrays on and laser off
+                	            elif ((detectorStatus == 1) and (beamStatus[tagCounter - tagCounterOffset] == 1) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 0)):
+                	                anyReferenceHits = True
+                	                detectorReferenceTags[0].append(tagNumber)
+                	                if detectorReferenceSum.any():
+                	                    detectorReferenceSum += detectorData
+                	                    detectorReferenceSquaredSum += detectorData*detectorData
+                	                    if options.temperature:
+                	                        detectorRefTemperatureSum += detectorTemperature
+                	                        detectorRefTemperatureSquaredSum += detectorTemperature*detectorTemperature
+                	                else:
+                	                    detectorReferenceSum = detectorData
+                	                    detectorReferenceSquaredSum = detectorData*detectorData
+                	                    if options.temperature:
+                	                        detectorRefTemperatureSum = detectorTemperature
+                	                        detectorRefTemperatureSquaredSum = detectorTemperature*detectorTemperature
+                	                if options.verbose:
+                	                    print "\t\t[%d] reference hit" % tagNumber
+                	            # xrays on and laser off (excluded)
+                	            elif (((detectorStatus == 0) or (beamStatus[tagCounter - tagCounterOffset] == 0)) and (xraysStatus[tagIndex] == 1) and (laserStatus[tagIndex] == 0)):
+                	                anyExcludedReferenceHits = True
+                	                detectorReferenceTags[1].append(tagNumber)
+                	                if detectorReferenceExcludedSum.any():
+                	                    detectorReferenceExcludedSum += detectorData
+                	                    detectorReferenceExcludedSquaredSum += detectorData*detectorData
+                	                    if options.temperature:
+                	                        detectorRefTemperatureExcludedSum += detectorTemperature
+                	                        detectorRefTemperatureExcludedSquaredSum += detectorTemperature*detectorTemperature
+                	                else:
+                	                    detectorReferenceExcludedSum = detectorData
+                	                    detectorReferenceExcludedSquaredSum = detectorData*detectorData
+                	                    if options.temperature:
+                	                        detectorRefTemperatureExcludedSum = detectorTemperature
+                	                        detectorRefTemperatureExcludedSquaredSum = detectorTemperature*detectorTemperature
+                	                if options.verbose:
+                	                    print "\t\t[%d] excluded reference hit" % tagNumber
+                	            # xrays off
+                	            elif ((detectorStatus == 1) and (beamStatus[tagCounter - tagCounterOffset] == 1) and (xraysStatus[tagIndex] == 0)):
+                	                anyBackgroundShots = True
+                	                detectorBackgroundTags[0].append(tagNumber)
+                	                if detectorBackgroundSum.any():
+                	                    detectorBackgroundSum += detectorData
+                	                    detectorBackgroundSquaredSum += detectorData*detectorData
+                	                    if options.temperature:
+                	                        detectorBGTemperatureSum += detectorTemperature
+                	                        detectorBGTemperatureSquaredSum += detectorTemperature*detectorTemperature
+                	                else:
+                	                    detectorBackgroundSum = detectorData
+                	                    detectorBackgroundSquaredSum = detectorData*detectorData
+                	                    if options.temperature:
+                	                        detectorBGTemperatureSum = detectorTemperature
+                	                        detectorBGTemperatureSquaredSum = detectorTemperature*detectorTemperature                                
+                	                if options.verbose:
+                	                    print "\t\t[%d] background shot" % tagNumber
+                	            # xrays off (excluded)
+                	            elif (((detectorStatus == 0) or (beamStatus[tagCounter - tagCounterOffset] == 0)) and (xraysStatus[tagIndex] == 0)):
+                	                anyExcludedBackgroundShots = True
+                	                detectorBackgroundTags[1].append(tagNumber)
+                	                if detectorBackgroundExcludedSum.any():
+                	                    detectorBackgroundExcludedSum += detectorData
+                	                    detectorBackgroundExcludedSquaredSum += detectorData*detectorData
+                	                    if options.temperature:
+                	                        detectorBGTemperatureExcludedSum += detectorTemperature
+                	                        detectorBGTemperatureExcludedSquaredSum += detectorTemperature*detectorTemperature
+                	                else:
+                	                    detectorBackgroundExcludedSum = detectorData
+                	                    detectorBackgroundExcludedSquaredSum = detectorData*detectorData
+                	                    if options.temperature:
+                	                        detectorBGTemperatureExcludedSum = detectorTemperature
+                	                        detectorBGTemperatureExcludedSquaredSum = detectorTemperature*detectorTemperature
+                	                if options.verbose:
+                	                    print "\t\t[%d] excluded background shot" % tagNumber
+                	            else:
+                	                if xraysStatus[tagIndex] and laserStatus[tagIndex]:
+                	                    print "Tag %d could not be classified (detector = %d, xrays = %d, laser = %d)..." % (tagNumber, detectorStatus, xraysStatus[tagIndex], laserStatus[tagIndex])
+                	                else:
+                	                    print "Tag %d could not be classified (detector = %d)..." % (tagNumber, detectorStatus)
+                	            tagCounter += 1
+                	        # this is used to break the script for testing
+                	        if (options.nShots > 0) and (tagCounter >= options.nShots):
+                	            break
+                                # collect unused memory to avoid 'High memory usage errors'
+                                gc.collect()
+                        iFiles += 1
                 toc = time.time()
                 times.append(toc - tic)
                 print "\tRead detector data for %d tags in %.2f s" % (tagCounter, toc - tic)
@@ -580,11 +828,11 @@ if options.inputFile != '' and os.path.exists(source_dir + options.inputFile):
                         # calculate mean
                         runReferenceExcludedMean.append(detectorReferenceExcludedSum/np.float(len(detectorReferenceTags[1])))
                         # calculate stdev from sqrt(E[X^2] - E[X]^2), only works for 1/N (non-corrected) normalization
-                        runReferenceExcludedStd.append(np.sqrt(round((detectorReferenceExcludedSquaredSum - detectorReferenceExcludedSum*detectorReferenceExcludedSum/np.float(len(detectorReferenceTags[1])))/np.float(len(detectorReferenceTags[1]))*1.0E10)/1.0E10))
+                        runReferenceExcludedStd.append(np.sqrt((detectorReferenceExcludedSquaredSum - detectorReferenceExcludedSum*detectorReferenceExcludedSum/np.float(len(detectorReferenceTags[1])))/np.float(len(detectorReferenceTags[1]))))
                         if options.temperature:
                             runRefTemperatureExcludedMean.append(detectorRefTemperatureExcludedSum/np.float(len(detectorReferenceTags[0])))
                             # round root-operand to 10 decimals to avoid negative numbers for really small deviations
-                            runRefTemperatureExcludedStd.append(np.sqrt((detectorRefTemperatureExcludedSquaredSum - detectorRefTemperatureExcludedSum*detectorRefTemperatureExcludedSum/np.float(len(detectorReferenceTags[1])))/np.float(len(detectorReferenceTags[0]))))
+                            runRefTemperatureExcludedStd.append(np.sqrt(round((detectorRefTemperatureExcludedSquaredSum - detectorRefTemperatureExcludedSum*detectorRefTemperatureExcludedSum/np.float(len(detectorReferenceTags[1])))/np.float(len(detectorReferenceTags[0]))*1.0E10)/1.0E10))
                 if anyBackgroundShots:
                         # calculate mean
                         runBackgroundMean.append(detectorBackgroundSum/np.float(len(detectorBackgroundTags[0])))
